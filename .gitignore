@@ -1,0 +1,5 @@
+src/.env
+src/.venv
+src/uv.lock
+src/.python-version
+src/__pycache__
