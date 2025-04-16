@@ -1,19 +1,20 @@
 import sys
 sys.stdout.reconfigure(encoding='utf-8')
 import asyncio
+import aiohttp
 from mcp.server.fastmcp import FastMCP
 from duckduckgo_search import DDGS
 from sentence_transformers import SentenceTransformer, util
 
-# Import Crawl4AI classes based on the updated docs
-from crawl4ai import AsyncWebCrawler, CrawlerRunConfig
-from crawl4ai.markdown_generation_strategy import DefaultMarkdownGenerator
-from crawl4ai.content_filter_strategy import PruningContentFilter
+# Use readability to extract main content and html2text to convert HTML to Markdown.
+from readability import Document
+import html2text
+
 
 # Initialize the embedding model
 embedding_model = SentenceTransformer('all-MiniLM-L6-v2')
 
-# Create the MCP server instance
+# Create the MCP server instance.
 mcp = FastMCP("DocSearchContextServer")
 
 @mcp.tool()
@@ -36,52 +37,45 @@ def doc_search(technology: str, task: str, version: str = None) -> str:
             results.append(f"{result['title']}: {result['href']}")
     return "\n".join(results) if results else "No documentation links found."
 
-async def crawl_scrape(url: str) -> str:
+async def lightweight_scrape(url: str) -> str:
     """
-    Uses Crawl4AI’s asynchronous crawler to fetch a URL and generate
-    fit markdown (filtered markdown) from the webpage.
-    
-    The configuration below applies a PruningContentFilter with:
-      - threshold=0.45,
-      - threshold_type="dynamic",
-      - min_word_threshold=5.
+    Asynchronously fetches a web page using aiohttp, extracts the main content using
+    readability-lxml, and converts it to markdown via html2text.
     
     Returns:
-         The full fit_markdown output if the crawl is successful,
-         or an error message.
+         str: The untrimmed markdown text of the main content, or an error message.
     """
-    # Configure Crawl4AI with a PruningContentFilter for fit markdown
-    md_generator = DefaultMarkdownGenerator(
-        content_filter=PruningContentFilter(
-            threshold=0.45,
-            threshold_type="dynamic",
-            min_word_threshold=5
-        )
-    )
-    config = CrawlerRunConfig(
-        markdown_generator=md_generator
-    )
+    try:
+        async with aiohttp.ClientSession() as session:
+            async with session.get(url, timeout=10) as response:
+                html = await response.text()
+    except Exception as e:
+        return f"Error fetching {url}: {str(e)}"
     
-    async with AsyncWebCrawler() as crawler:
-        result = await crawler.arun(url, config=config)
-        if result.success:
-            # Return the filtered "fit_markdown" version
-            return result.markdown.fit_markdown
-        else:
-            return f"Error scraping {url}: {result.error_message}"
+    try:
+        # Use readability to extract the main article content.
+        doc = Document(html)
+        content_html = doc.summary()
+        # Convert the content HTML to Markdown using html2text.
+        h = html2text.HTML2Text()
+        h.ignore_links = False  # Set to True if you want to remove links.
+        markdown = h.handle(content_html)
+        return markdown
+    except Exception as e:
+        return f"Error processing {url}: {str(e)}"
 
 def extract_relevant_context_from_texts(texts: list[str], query: str, top_k: int = 3) -> str:
     """
-    Given a list of markdown texts and a query, computes vector embeddings and
-    returns the top_k most relevant texts.
+    Given a list of markdown texts and a query, compute vector embeddings and
+    return the top_k most relevant texts.
     
     Parameters:
          texts (list[str]): List of markdown texts.
-         query (str): The query to determine relevance.
-         top_k (int): Number of top relevant texts to return.
+         query (str): The query to match against.
+         top_k (int): Number of top texts to return.
     
     Returns:
-         str: The best matching snippets with relevance scores.
+         str: Concatenated snippets with relevance scores.
     """
     if not texts:
         return "No texts available for context extraction."
@@ -105,21 +99,21 @@ def extract_relevant_context_from_texts(texts: list[str], query: str, top_k: int
 @mcp.tool()
 async def doc_context(urls: list[str], query: str) -> str:
     """
-    Extracts and processes documentation context from a list of URLs
-    by using Crawl4AI to generate fit markdown (filtered by PruningContentFilter)
-    and then scoring the returned markdown against a query.
+    Extracts and processes documentation context from a list of URLs by:
+      1. Asynchronously fetching each URL and converting its main content into Markdown.
+      2. Evaluating the relevance of each Markdown document against the query.
     
     Parameters:
          urls (list[str]): List of documentation URLs.
-         query (str): The context query to rank the content.
+         query (str): The query to rank content.
     
     Returns:
-         str: The most relevant markdown context based on the query.
+         str: The most relevant Markdown context based on the query.
     """
-    # Fetch fit markdown content concurrently from all URLs
-    markdown_texts = await asyncio.gather(*(crawl_scrape(url) for url in urls))
+    # Fetch markdown content concurrently from all provided URLs.
+    markdown_texts = await asyncio.gather(*(lightweight_scrape(url) for url in urls))
     
-    # Process extracted markdown texts to determine relevance
+    # Process the extracted texts to determine relevance.
     context = extract_relevant_context_from_texts(markdown_texts, query)
     return context
 
