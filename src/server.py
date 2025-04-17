@@ -8,7 +8,17 @@ from sentence_transformers import SentenceTransformer, util
 from readability import Document
 import html2text
 import re
+import os
+from dotenv import load_dotenv
+load_dotenv()
 
+# MASA Data API base URL 
+MASA_BASE_URL = "https://data.dev.masalabs.ai"
+
+MASA_API_KEY = os.environ.get("MASA_DATA_API_KEY")
+if MASA_API_KEY is None:
+    raise EnvironmentError("MASA_API_KEY not found in .env file or environment variables!")
+    
 # Initialize the embedding model
 embedding_model = SentenceTransformer('all-MiniLM-L6-v2')
 
@@ -73,7 +83,7 @@ def get_latest_version(technology: str) -> str:
 #         str: The documentation search results including the version info.
 #     """
 #     version = get_latest_version(technology)
-#     return doc_search(technology, task, version)
+#     return obtain_relevant_doc_urls(technology, task, version)
 
 async def lightweight_scrape(url: str) -> str:
     """
@@ -133,6 +143,79 @@ def extract_relevant_context_from_texts(texts: list[str], query: str, top_k: int
     for score, snippet in top_texts:
         output.append(f"Score: {score:.3f}\n{snippet}\n")
     return "\n".join(output)
+
+@mcp.tool()
+async def masa_scrape(url: str, depth: int = 2, timeout_sec: int = 30) -> str:
+    """
+    Performs a complete real-time web scrape using the MASA Data API:
+      1. Creates a scraping job for the given URL.
+      2. Polls the job status until completion.
+      3. Retrieves and returns the scraping results.
+    
+    Parameters:
+        url (str): The URL to scrape.
+        depth (int): The scraping depth (default: 2).
+        timeout_sec (int): The timeout for scraping (default: 30 seconds).
+        api_key (str): API key for MASA Data API authorization.
+    
+    Returns:
+        str: The scraped results (formatted as a string), or an error message.
+    """
+    headers = {
+        "accept": "application/json",
+        "Content-Type": "application/json",
+        "Authorization": f"Bearer {MASA_API_KEY}"
+    }
+    create_endpoint = f"{MASA_BASE_URL}/api/v1/search/live/web"
+    payload = {"url": url, "depth": depth, "timeout": timeout_sec}
+    
+    try:
+        async with aiohttp.ClientSession() as session:
+            # Step 1: Create a scraping job.
+            async with session.post(create_endpoint, json=payload, headers=headers) as response:
+                json_response = await response.json()
+                if "uuid" not in json_response:
+                    return f"Error creating job: {json_response.get('error', 'Unknown error')}"
+                job_uuid = json_response["uuid"]
+    except Exception as e:
+        return f"Exception during job creation: {str(e)}"
+    
+    # Step 2: Poll the job status.
+    status_endpoint = f"{MASA_BASE_URL}/api/v1/search/live/web/status/{job_uuid}"
+    max_attempts = 15  # e.g. poll for up to 30 seconds (15 * 2 seconds)
+    for attempt in range(max_attempts):
+        await asyncio.sleep(2)  # Wait for 2 seconds between polls.
+        try:
+            async with aiohttp.ClientSession() as session:
+                async with session.get(status_endpoint, headers=headers) as resp:
+                    status_json = await resp.json()
+                    status = status_json.get("status", "").lower()
+                    if status in ["completed", "finished", "done"]:
+                        break
+                    elif status in ["error", "failed"]:
+                        return f"Job failed with status: {status}"
+        except Exception as e:
+            return f"Exception during job status polling: {str(e)}"
+    else:
+        return "Job did not complete within the expected time."
+    
+    # Step 3: Retrieve the job results.
+    result_endpoint = f"{MASA_BASE_URL}/api/v1/search/live/web/result/{job_uuid}"
+    try:
+        async with aiohttp.ClientSession() as session:
+            async with session.get(result_endpoint, headers=headers) as resp:
+                result_json = await resp.json()
+                if "results" in result_json:
+                    results = result_json["results"]
+                    formatted_results = "\n".join([
+                        f"Title: {item.get('title', '')}\nURL: {item.get('url', '')}\nSnippet: {item.get('snippet', '')}"
+                        for item in results
+                    ])
+                    return formatted_results if formatted_results else "No results found."
+                else:
+                    return f"Error retrieving results: {result_json.get('error', 'Unknown error')}"
+    except Exception as e:
+        return f"Exception during result retrieval: {str(e)}"
 
 @mcp.tool()
 async def obtain_doc_context_from_urls(urls: list[str], query: str) -> str:
