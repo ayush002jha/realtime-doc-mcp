@@ -302,7 +302,7 @@ class MCPClient:
         """Process a query with Gemini and tools, showing spinners and updating the UI."""
         user_prompt_content = types.Content(
             role='user',
-            parts=[types.Part.from_text(text="Always use available tools over your internal knowledge. You must use every tool to produce accurate answer!  "+query)]
+            parts=[types.Part.from_text(text="Always use available tools over your internal knowledge. You must first fetch latest stable version of the tech, followed by fetching relevant urls related to query and finally scrape these urls to get context to produce accurate answer!  "+query)]
         )
 
         conversation = [user_prompt_content]

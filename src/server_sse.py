@@ -36,33 +36,12 @@ tavily = TavilyClient(TAVILY_API_KEY)
 
 # -------------------- MCP Tools --------------------
 @mcp.tool()
-def obtain_relevant_doc_urls(technology: str, task: str, version: str = None) -> str:
-    """
-    Searches for documentation links using DuckDuckGo. You need to run doc_context to get the context/data of the documentation. This will only provide links.
-    
-    Parameters:
-        technology (str): Any technology name e.g. 'Next.js', 'Vite', 'C++', etc...
-        task (str): Any task e.g. 'create API route', 'write backend server', etc...
-        version (str, optional): Version number e.g. '13', '15.4', etc...
-    
-    Returns:
-        str: A newline-delimited list of documentation links.
-    """
-    query = f"{technology} {version} {task}" if version else f"{technology} {task}"
-    results = []
-    from duckduckgo_search import DDGS
-    with DDGS() as ddgs:
-        for r in ddgs.text(query, max_results=5):
-            results.append(f"{r['title']}: {r['href']}")
-    return "\n".join(results) if results else "No documentation links found."
-
-@mcp.tool()
-def get_latest_version(technology: str) -> str:
+def get_latest_version_tech(technology: str) -> str:
     """
     Fetches the latest stable version for the specified technology using DuckDuckGo.
     
     Parameters:
-        technology (str): Any technology name e.g. 'Next.js', 'Vite', 'C++', etc...
+        technology (str): Any technology name 
     
     Returns:
         str: The extracted version string, or a message if not found.
@@ -79,6 +58,29 @@ def get_latest_version(technology: str) -> str:
         return answer or "No version found."
     except Exception as e:
         return f"Error fetching version via Tavily: {e}"
+
+@mcp.tool()
+def fetch_relevant_doc_urls(technology: str, task: str, version: str = None) -> str:
+    """
+    Searches for documentation links using DuckDuckGo. You need to run doc_context to get the context/data of the documentation. This will only provide links.
+    
+    Parameters:
+        technology (str): Any technology name 
+        task (str): Any task e.g. 'create API route', 'write backend server', etc...
+        version (str, optional): Version number e.g. '13', '15.4', etc...
+    
+    Returns:
+        str: A newline-delimited list of documentation links.
+    """
+    query = f"{technology} {version} {task}" if version else f"{technology} {task}"
+    results = []
+    from duckduckgo_search import DDGS
+    with DDGS() as ddgs:
+        for r in ddgs.text(query, max_results=5):
+            results.append(f"{r['title']}: {r['href']}")
+    return "\n".join(results) if results else "No documentation links found."
+
+
 
 async def masa_fetch_text(url: str) -> str:
     """
@@ -123,7 +125,7 @@ async def lightweight_scrape(url: str) -> str:
         return f"Error processing {url}: {e}"
 
 @mcp.tool()
-async def masa_scrape_multiple_urls(urls: list[str], query: str) -> str:
+async def scrape_multiple_urls_to_get_context(urls: list[str], query: str) -> str:
     """
     Scrape multiple URLs via MASA Data API, score them against `query`,
     and return the full scrape of the most relevant URL.

@@ -1,322 +1,492 @@
-#!/usr/bin/env python
+
 """
 client_sse.py
 
 This file implements an MCP client that connects to an MCP server using SSE (Server-Sent Events) transport.
-SSE is a technology that allows a server to push real-time updates to a client over a single, persistent HTTP connection.
-Unlike websockets, SSE provides one-way communication from the server to the client, which is useful for streaming updates.
-
-This client also uses Google's Gemini SDK for AI model integration. The Gemini API can perform natural language processing
-tasks and, when needed, call external tools (in this case, MCP tools) to perform specific functions.
-
-A stream manager (or stream context) in this code is responsible for managing the lifecycle of the SSE connection,
-ensuring that the connection is properly opened and closed. We use asynchronous context managers to handle these resources safely.
+It features UI enhancements like colored output, spinners, and formatted sections, similar to client.py.
+It supports multi-turn conversations and sequential tool calling based on Gemini's responses.
 """
 
 import asyncio            # For asynchronous programming
-import os                 # For accessing environment variables
+import os                 # For accessing environment variables and terminal size
 import sys                # For command-line argument handling
 import json               # For JSON processing
-from typing import Optional  # For type annotations, e.g., indicating that a variable may be None
+import time               # For spinner delay
+import shutil             # For terminal size detection
+import threading          # For spinner thread
+import itertools          # For spinner characters
+from typing import Optional  # For type annotations
+from contextlib import AsyncExitStack # For managing async contexts
 
-# Import ClientSession from the MCP package. This object manages communication with the MCP server.
+# Import MCP components
 from mcp import ClientSession
+from mcp.client.sse import sse_client # Use SSE client
 
-# Import the SSE client helper. This is assumed to be an asynchronous context manager that provides the connection streams.
-# These streams represent the channels over which data is sent and received via SSE.
-from mcp.client.sse import sse_client
-
-# Import components from the Gemini SDK for AI-based function calling and natural language processing.
+# Import Gemini components
 from google import genai
 from google.genai import types
 from google.genai.types import Tool, FunctionDeclaration
 from google.genai.types import GenerateContentConfig
 
-# Import dotenv to load environment variables from a .env file (e.g., API keys).
+# Import utilities
 from dotenv import load_dotenv
+from colorama import Fore, Style, init
 
-# Load environment variables from the .env file so that our API keys and other settings are available.
+# Initialize colorama for colored output
+init(autoreset=True)
+
+# Load environment variables from .env file
 load_dotenv()
 
+# --- Spinner Class (Copied from client.py) ---
+class Spinner:
+    """A simple terminal spinner using threading."""
+    def __init__(self, message="Processing...", delay=0.1):
+        self.spinner_chars = itertools.cycle(['🌑', '🌒', '🌓', '🌔', '🌕', '🌖', '🌗', '🌘'])
+        self.delay = delay
+        self._busy = False
+        self._spinner_visible = False
+        self.message = message
+        self._thread = None
+        self._lock = threading.Lock() # To manage state changes safely
 
+    def _spinner_task(self):
+        """The task that runs in a separate thread to display the spinner."""
+        while self._busy:
+            char = next(self.spinner_chars)
+            print(f'\r{self.message} {char}', end='', flush=True)
+            self._spinner_visible = True
+            time.sleep(self.delay)
+
+    def start(self, message="Processing..."):
+        """Start the spinner."""
+        with self._lock:
+            if self._thread and self._thread.is_alive():
+                return # Avoid starting multiple threads if already running
+
+            self.message = message
+            self._busy = True
+            self._thread = threading.Thread(target=self._spinner_task, daemon=True)
+            self._thread.start()
+
+    def stop(self):
+        """Stop the spinner and clear the line."""
+        with self._lock:
+            if not self._thread or not self._thread.is_alive():
+                 if self._spinner_visible:
+                    print('\r' + ' ' * (len(self.message) + 5) + '\r', end='', flush=True)
+                    self._spinner_visible = False
+                 self._busy = False
+                 self._thread = None
+                 return
+
+            self._busy = False
+            self._thread.join(timeout=self.delay * 3)
+            if self._spinner_visible:
+                print('\r' + ' ' * (len(self.message) + 5) + '\r', end='', flush=True)
+                self._spinner_visible = False
+            self._thread = None
+
+# --- Utility Functions (Copied/Adapted from client.py) ---
+def get_terminal_size():
+    """Get terminal size and return columns, rows."""
+    try:
+        columns, rows = shutil.get_terminal_size()
+    except OSError:
+        columns, rows = 80, 24 # Default size
+    return columns, rows
+
+def draw_section(text, width, color=Fore.CYAN, emoji=""):
+    """Draw a section with only top and bottom horizontal lines."""
+    horizontal_line = "━" * width
+    wrapped_lines = []
+    if isinstance(text, list):
+        for line in text:
+            wrapped_lines.extend(_wrap_text(str(line), width - (4 if emoji else 2)))
+    else:
+        wrapped_lines = _wrap_text(str(text), width - (4 if emoji else 2))
+
+    if emoji and wrapped_lines:
+        if wrapped_lines[0].strip():
+             wrapped_lines[0] = f"{emoji}  {wrapped_lines[0]}"
+        else:
+             found = False
+             for i, line in enumerate(wrapped_lines):
+                 if line.strip():
+                     wrapped_lines[i] = f"{emoji}  {line}"
+                     found = True
+                     break
+             if not found:
+                 wrapped_lines.insert(0, f"{emoji}")
+
+    content_lines = []
+    left_margin = " "
+    right_margin = " "
+    for line in wrapped_lines:
+        clean_line = _strip_ansi(line)
+        available_width_for_text_and_padding = width - len(left_margin) - len(right_margin)
+        padding_needed = max(0, available_width_for_text_and_padding - len(clean_line))
+        right_padding = ' ' * padding_needed
+        content_lines.append(f"{left_margin}{line}{right_padding}{right_margin}")
+
+    result = [
+        f"{color}{horizontal_line}",
+        *[f"{Style.RESET_ALL}{line}" for line in content_lines],
+        f"{color}{horizontal_line}"
+    ]
+    return "\n".join(result)
+
+def _wrap_text(text, width):
+    """Wrap text to fit within specified width, handling existing newlines."""
+    if not text: return [""]
+    if width <= 0: return [text]
+    lines = []
+    paragraphs = text.split('\n')
+    for paragraph in paragraphs:
+        if not paragraph.strip():
+            lines.append("")
+            continue
+        words = paragraph.split(' ')
+        current_line = []
+        current_length = 0
+        for word in words:
+            clean_word = _strip_ansi(word)
+            word_len = len(clean_word)
+            if word_len > width:
+                if current_line:
+                    lines.append(' '.join(current_line))
+                    current_line = []
+                    current_length = 0
+                start_index = 0
+                while start_index < len(word):
+                    end_index = start_index
+                    char_count = 0
+                    in_ansi = False
+                    while end_index < len(word) and char_count < width:
+                        if word[end_index] == '\x1b': in_ansi = True
+                        elif in_ansi and word[end_index].isalpha(): in_ansi = False
+                        if not in_ansi: char_count += 1
+                        end_index += 1
+                    lines.append(word[start_index:end_index])
+                    start_index = end_index
+                continue
+            if current_length + word_len + (1 if current_line else 0) <= width:
+                current_line.append(word)
+                current_length += word_len + (1 if current_length > 0 else 0)
+            else:
+                lines.append(' '.join(current_line))
+                current_line = [word]
+                current_length = word_len
+        if current_line:
+            lines.append(' '.join(current_line))
+    return lines if lines else [""]
+
+def _strip_ansi(text):
+    """Strip ANSI escape codes for correct length calculation."""
+    import re
+    ansi_escape = re.compile(r'\x1B(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~])')
+    return ansi_escape.sub('', text)
+
+def clear_screen():
+    """Clear the terminal screen."""
+    os.system('cls' if os.name == 'nt' else 'clear')
+
+# --- MCP Client Class (Updated) ---
 class MCPClient:
     def __init__(self):
-        """
-        Initialize the MCP client.
-        
-        This constructor sets up:
-         - The Gemini AI client using an API key from the environment variables.
-         - Placeholders for the client session and the stream context (which manages the SSE connection).
-        
-        The Gemini client is used to generate content (e.g., processing user queries) and can request to call tools.
-        """
-        # Placeholder for the MCP session that will manage communication with the MCP server.
+        """Initialize the MCP client with UI elements and Gemini."""
         self.session: Optional[ClientSession] = None
-        
-        # These will hold our context managers for the SSE connection.
-        self._streams_context = None  # Manages the SSE stream lifecycle
-        self._session_context = None  # Manages the MCP session lifecycle
-
-        # Retrieve the Gemini API key from environment variables.
+        self.exit_stack = AsyncExitStack() # Use AsyncExitStack for cleanup
         gemini_api_key = os.getenv("GEMINI_API_KEY")
         if not gemini_api_key:
             raise ValueError("GEMINI_API_KEY not found. Please add it to your .env file.")
-
-        # Initialize the Gemini client with the API key. This client is used to communicate with the Gemini AI models.
         self.genai_client = genai.Client(api_key=gemini_api_key)
+        self.tools = []
+        self.function_declarations = []
+        self.terminal_width, self.terminal_height = get_terminal_size()
+        self.box_width = min(100, self.terminal_width - 4)
+        self.spinner = Spinner() # Initialize the spinner
+
+        # Define consistent colors
+        self.MAIN_COLOR = Fore.MAGENTA   # Changed main color for SSE client distinction
+        self.TOOL_COLOR = Fore.YELLOW
+        self.INPUT_COLOR = Fore.GREEN
+        self.RESPONSE_COLOR = Fore.CYAN
 
     async def connect_to_sse_server(self, server_url: str):
-        """
-        Connect to an MCP server that uses SSE transport.
-        
-        Steps performed in this function:
-         1. Open an SSE connection using the provided server URL.
-         2. Use the connection streams to create an MCP ClientSession.
-         3. Initialize the MCP session, which sets up the protocol for communication.
-         4. Retrieve and display the list of available tools from the MCP server.
-        
-        Args:
-            server_url (str): The URL of the MCP server that supports SSE.
-        """
-        # 1. Open an SSE connection to the server.
-        #    The sse_client function returns an async context manager that yields the streams (data channels) for communication.
-        self._streams_context = sse_client(url=server_url)
-        # Enter the asynchronous context to get the streams. This ensures proper resource management.
-        streams = await self._streams_context.__aenter__()
-        # 'streams' is expected to be a tuple (like (reader, writer)) that the ClientSession can use.
+        """Connect to the MCP server via SSE and list available tools."""
+        print(f"Attempting to connect to SSE server at: {server_url}")
+        # Use AsyncExitStack to manage SSE client and MCP session contexts
+        streams_context = sse_client(url=server_url)
+        streams = await self.exit_stack.enter_async_context(streams_context)
+        session_context = ClientSession(*streams)
+        self.session = await self.exit_stack.enter_async_context(session_context)
 
-        # 2. Create an MCP ClientSession using the streams provided by the SSE connection.
-        #    The ClientSession object handles sending and receiving messages following the MCP protocol.
-        self._session_context = ClientSession(*streams)
-        self.session: ClientSession = await self._session_context.__aenter__()
-
-        # 3. Initialize the MCP session.
-        #    This step typically sends an initialization message to the server to negotiate capabilities and start the protocol.
         await self.session.initialize()
 
-        # 4. Retrieve and list available tools from the MCP server.
-        #    This helps confirm that the connection is working and shows what functions or tools are available.
-        print("Initialized SSE client...")
-        print("Listing tools...")
         response = await self.session.list_tools()
-        tools = response.tools
-        print("\nConnected to server with tools:", [tool.name for tool in tools])
+        self.tools = response.tools
+        self.function_declarations = convert_mcp_tools_to_gemini(self.tools)
+        print(f"{Fore.GREEN}Successfully connected to SSE server.{Style.RESET_ALL}")
 
-        # Convert the MCP tool definitions to a format compatible with the Gemini API for function calling.
-        self.function_declarations = convert_mcp_tools_to_gemini(tools)
 
-    async def cleanup(self):
-        """
-        Clean up resources by properly closing the SSE session and stream contexts.
-        
-        As we used asynchronous context managers (which are like 'with' blocks for async code), we need to manually call their exit methods.
-        This ensures that all network connections and resources are gracefully closed when the client is finished.
-        """
-        # If the MCP session context was created, exit it to close the session.
-        if self._session_context:
-            await self._session_context.__aexit__(None, None, None)
-        # If the SSE stream context was created, exit it to close the underlying SSE connection.
-        if self._streams_context:
-            await self._streams_context.__aexit__(None, None, None)
+    def display_welcome_screen(self):
+        """Display a welcome screen with available tools."""
+        clear_screen()
+        title = f"{self.MAIN_COLOR}AI-Powered Tool Assistant (SSE Client){Style.RESET_ALL}"
+        title_section = draw_section(title, self.box_width, self.MAIN_COLOR, emoji="📡") # SSE Emoji
+
+        tool_descriptions = []
+        if self.tools:
+            for tool in self.tools:
+                tool_descriptions.append(f"{self.TOOL_COLOR}{tool.name}{Style.RESET_ALL}: {tool.description}")
+        else:
+            tool_descriptions.append("No tools available from the server.")
+        tools_section = draw_section(tool_descriptions, self.box_width, self.MAIN_COLOR, emoji="🧰")
+
+        instructions = [
+            f"• Type your query below and press Enter.",
+            f"• The AI will use tools ({self.TOOL_COLOR}Yellow{Style.RESET_ALL}) if needed.",
+            f"• Type {Style.BRIGHT}'quit'{Style.NORMAL} to exit."
+        ]
+        instructions_section = draw_section(instructions, self.box_width, self.MAIN_COLOR, emoji="ℹ️")
+
+        print("\n" + title_section)
+        print("\n" + tools_section)
+        print("\n" + instructions_section)
 
     async def process_query(self, query: str) -> str:
-        """
-        Process a user query using the Gemini API. If Gemini requests a tool call (via function calling),
-        this function will call the tool on the MCP server and send the result back to Gemini for a final response.
-        
-        Steps:
-         1. Format the user's query as a structured content object.
-         2. Send the query to Gemini and include available MCP tool declarations.
-         3. Check if Gemini's response contains a function call; if so, execute the tool and send back the response.
-         4. Return the final processed text from Gemini.
-        
-        Args:
-            query (str): The input query from the user.
-        
-        Returns:
-            str: The final text response generated by the Gemini model.
-        """
-        # 1. Create a Gemini Content object representing the user's query.
-        #    This object includes a role (user) and the query text wrapped in a part.
+        """Process a query with Gemini and tools, handling multiple tool calls."""
         user_prompt_content = types.Content(
             role='user',
-            parts=[types.Part.from_text(text=query)]
+            parts=[types.Part.from_text(text="Always use available tools over your internal knowledge. You must first fetch latest stable version of the tech, followed by fetching relevant urls related to query and finally scrape these urls to get context to produce accurate answer!  "+query)]
+            # parts=[types.Part.from_text(text=query)] # Simplified prompt for testing
         )
 
-        # 2. Send the query to the Gemini model.
-        #    We include available tool declarations so Gemini knows it can request function calls.
-        response = self.genai_client.models.generate_content(
-            model='gemini-2.0-flash-001',  # Name of the Gemini model to use.
-            contents=[user_prompt_content],
-            config=types.GenerateContentConfig(
-                tools=self.function_declarations,  # Pass in the list of MCP tools formatted for Gemini.
-            ),
-        )
+        conversation = [user_prompt_content]
+        final_text_parts = [] # Collect text parts separately
 
-        # Prepare a list to accumulate the final response text.
-        final_text = []
+        # Use a loop similar to client.py to handle potential sequences of tool calls
+        while True:
+            self.spinner.start("🔮 AI is thinking...")
+            try:
+                response = self.genai_client.models.generate_content(
+                    model='gemini-1.5-flash-latest', # Using a capable model
+                    contents=conversation,
+                    config=types.GenerateContentConfig(
+                        tools=self.function_declarations,
+                    ),
+                )
+            except Exception as e:
+                self.spinner.stop()
+                error_message = f"Error during AI generation: {e}"
+                print("\n" + draw_section(error_message, self.box_width, Fore.RED, emoji="❌"))
+                return "" # Return empty on error
+            finally:
+                self.spinner.stop()
 
-        # 3. Process each candidate response from Gemini.
-        for candidate in response.candidates:
-            if candidate.content.parts:  # Ensure that the response has parts (sections).
-                for part in candidate.content.parts:
-                    # If the part includes a function call, Gemini is asking us to run an MCP tool.
-                    if part.function_call:
-                        # Extract the name of the tool and its arguments from the function call.
-                        tool_name = part.function_call.name
-                        tool_args = part.function_call.args
-                        print(f"\n[Gemini requested tool call: {tool_name} with args {tool_args}]")
+            # Process response parts
+            function_calls = []
+            # Add the model's response (potentially containing function calls) to conversation history
+            # Check for valid response structure first
+            if not response.candidates or not response.candidates[0].content or not response.candidates[0].content.parts:
+                 safety_reason = response.prompt_feedback.block_reason if response.prompt_feedback else "Unknown"
+                 finish_reason = response.candidates[0].finish_reason if response.candidates else "Unknown"
+                 if finish_reason == types.FinishReason.STOP and not final_text_parts:
+                     pass # Normal stop without text/calls
+                 elif finish_reason != types.FinishReason.STOP:
+                     block_message = f"AI response blocked. Reason: {safety_reason} / {finish_reason}"
+                     print("\n" + draw_section(block_message, self.box_width, Fore.RED, emoji="🚫"))
+                 if final_text_parts: # Return accumulated text if any
+                     break
+                 else: # No text, no function calls, nothing more to do
+                     return ""
 
-                        # Attempt to call the specified tool on the MCP server.
-                        try:
-                            result = await self.session.call_tool(tool_name, tool_args)
-                            # Wrap the result in a dictionary under the key "result".
-                            function_response = {"result": result.content}
-                        except Exception as e:
-                            # If an error occurs, capture the error message.
-                            function_response = {"error": str(e)}
+            model_response_content = response.candidates[0].content
+            conversation.append(model_response_content) # Add model response to history
 
-                        # Create a Gemini function response part using the result of the tool call.
-                        function_response_part = types.Part.from_function_response(
-                            name=tool_name,
-                            response=function_response
-                        )
+            for part in model_response_content.parts:
+                if part.function_call:
+                    function_calls.append(part.function_call)
+                    # The part containing the function call is already added via model_response_content
+                elif part.text:
+                    final_text_parts.append(part.text) # Collect text
 
-                        # Wrap the function response part in a Content object marked as coming from a tool.
-                        function_response_content = types.Content(
-                            role='tool',
-                            parts=[function_response_part]
-                        )
+            # If no function calls in this turn, break the loop
+            if not function_calls:
+                break
 
-                        # 4. Send the original query, the function call, and the tool response back to Gemini.
-                        #    Gemini will process this combined input to generate the final answer.
-                        response = self.genai_client.models.generate_content(
-                            model='gemini-2.0-flash-001',
-                            contents=[
-                                user_prompt_content,       # Original user query.
-                                part,                      # The function call that was requested.
-                                function_response_content, # The response from executing the tool.
-                            ],
-                            config=types.GenerateContentConfig(
-                                tools=self.function_declarations,
-                            ),
-                        )
+            # Execute function calls
+            tool_response_parts = []
+            for call in function_calls:
+                tool_name = call.name
+                # Convert Struct to dict for MCP call_tool
+                tool_args = {k: v for k, v in call.args.items()}
 
-                        # Append the text from the first part of Gemini's new candidate response.
-                        final_text.append(response.candidates[0].content.parts[0].text)
-                    else:
-                        # If there is no function call, just use the text provided by Gemini.
-                        final_text.append(part.text)
+                tool_message_details = f"Preparing to use tool: '{tool_name}'\nArguments: {json.dumps(tool_args, indent=2)}"
+                print("\n" + draw_section(tool_message_details, self.box_width, self.TOOL_COLOR, emoji="🛠️"))
 
-        # 5. Combine all parts of the response into a single string to be returned.
-        return "\n".join(final_text)
+                self.spinner.start(f"⚙️ Calling tool '{tool_name}'...")
+                function_response = {}
+                try:
+                    # Call the MCP Tool via SSE session
+                    result = await self.session.call_tool(tool_name, tool_args)
+                    # Ensure result.content is serializable (usually string)
+                    function_response = {"result": str(result.content)}
+                except Exception as e:
+                    function_response = {"error": f"Tool execution failed: {str(e)}"}
+                    print(f"\n{Fore.RED}Error calling tool {tool_name}: {e}{Style.RESET_ALL}")
+                finally:
+                    self.spinner.stop()
+
+                result_message = f"Tool '{tool_name}' result:\n{json.dumps(function_response, indent=2)}"
+                result_color = Fore.RED if "error" in function_response else self.TOOL_COLOR
+                print("\n" + draw_section(result_message, self.box_width, result_color, emoji="📦"))
+
+                # Create the FunctionResponse part for Gemini
+                tool_response_parts.append(types.Part.from_function_response(
+                    name=tool_name,
+                    response=function_response
+                ))
+
+            # Add the tool responses back to the conversation history for the next Gemini call
+            if tool_response_parts:
+                conversation.append(types.Content(role='tool', parts=tool_response_parts))
+            # Loop continues: Gemini processes tool responses
+
+        # Join collected text parts for the final response
+        return "\n".join(final_text_parts).strip()
+
 
     async def chat_loop(self):
-        """
-        Run an interactive chat loop in the terminal.
-        
-        This function allows the user to type queries one after the other. The loop continues until the user types 'quit'.
-        Each query is processed using the process_query method, and the response is printed to the console.
-        """
-        print("\nMCP Client Started! Type 'quit' to exit.")
+        """Run an interactive chat session with the user using the enhanced UI."""
+        self.display_welcome_screen()
 
         while True:
-            # Prompt the user to enter a query.
-            query = input("\nQuery: ").strip()
+            input_prompt = "Enter your query below (or type 'quit' to exit):"
+            input_section = draw_section(input_prompt, self.box_width, self.INPUT_COLOR, emoji="💬")
+            print("\n" + input_section)
+
+            try:
+                query = input(f"{self.INPUT_COLOR}>>> {Style.RESET_ALL}")
+            except EOFError:
+                query = 'quit'
+            except KeyboardInterrupt:
+                print("\nInterrupted. Type 'quit' to exit.")
+                continue
+
             if query.lower() == 'quit':
-                break  # Exit the loop if the user types 'quit'
+                goodbye_message = "Thank you for using the AI Tool Assistant (SSE). Goodbye!"
+                goodbye_section = draw_section(goodbye_message, self.box_width, self.MAIN_COLOR, emoji="👋")
+                print("\n" + goodbye_section + "\n")
+                break
 
-            # Process the query through the Gemini model and MCP server tool calls.
-            response = await self.process_query(query)
-            # Print the final response.
-            print("\n" + response)
+            if not query.strip():
+                continue
 
+            response_text = await self.process_query(query)
 
+            if response_text:
+                response_section = draw_section(response_text, self.box_width, self.RESPONSE_COLOR, emoji="💡")
+                print("\n" + response_section)
+            # Tool call/result messages are printed within process_query
+
+    async def cleanup(self):
+        """Clean up resources using AsyncExitStack."""
+        print("\nShutting down SSE client...")
+        self.spinner.stop() # Ensure spinner is stopped
+        await self.exit_stack.aclose() # Closes session and SSE connection
+        print("Connection closed.")
+
+# --- Helper Functions for Tool Conversion (Copied from client.py) ---
 def clean_schema(schema):
-    """
-    Recursively remove 'title' fields from a JSON schema.
-    
-    Some JSON schemas include a 'title' field that is not needed for our tool function calls.
-    This function goes through the schema and removes any 'title' entries, including nested ones.
-    
-    Args:
-        schema (dict): A dictionary representing a JSON schema.
-    
-    Returns:
-        dict: The cleaned JSON schema without any 'title' fields.
-    """
+    """Remove unsupported 'title' fields recursively from schema for Gemini."""
     if isinstance(schema, dict):
-        # Remove the 'title' key if it exists.
         schema.pop("title", None)
-        # If the schema has a "properties" key (common in JSON schemas) and it's a dict, process each property.
-        if "properties" in schema and isinstance(schema["properties"], dict):
-            for key in schema["properties"]:
-                schema["properties"][key] = clean_schema(schema["properties"][key])
+        for key, value in schema.items():
+            if isinstance(value, dict):
+                clean_schema(value)
+            elif isinstance(value, list):
+                for item in value:
+                    if isinstance(item, dict):
+                        clean_schema(item)
+            if key == "properties" and isinstance(value, dict):
+                 for prop_key in value:
+                     clean_schema(value[prop_key])
+            if key == "items" and isinstance(value, dict):
+                clean_schema(value)
     return schema
 
-
 def convert_mcp_tools_to_gemini(mcp_tools):
-    """
-    Convert MCP tool definitions into Gemini-compatible function declarations.
-    
-    Each MCP tool contains information such as its name, description, and an input JSON schema.
-    This function cleans the JSON schema (by removing unnecessary fields) and then creates a Gemini FunctionDeclaration.
-    The function declarations are then wrapped in Gemini Tool objects.
-    
-    Args:
-        mcp_tools (list): A list of MCP tool objects with attributes 'name', 'description', and 'inputSchema'.
-    
-    Returns:
-        list: A list of Gemini Tool objects ready for function calling.
-    """
+    """Convert MCP Tool definitions to Gemini Tool format."""
     gemini_tools = []
-
     for tool in mcp_tools:
-        # Clean the input schema to remove extraneous fields like 'title'
-        parameters = clean_schema(tool.inputSchema)
+        cleaned_parameters = clean_schema(tool.inputSchema or {})
+        if not isinstance(cleaned_parameters, dict):
+             print(f"Warning: Invalid schema format for tool '{tool.name}'. Skipping parameters.")
+             cleaned_parameters = {"type": "object", "properties": {}}
+        if "type" not in cleaned_parameters:
+            cleaned_parameters["type"] = "object"
+        if cleaned_parameters["type"] == "object" and "properties" not in cleaned_parameters:
+            cleaned_parameters["properties"] = {}
 
-        # Create a function declaration that describes how Gemini should call this tool.
-        function_declaration = FunctionDeclaration(
-            name=tool.name,
-            description=tool.description,
-            parameters=parameters
-        )
-
-        # Wrap the function declaration in a Gemini Tool object.
-        gemini_tool = Tool(function_declarations=[function_declaration])
-        gemini_tools.append(gemini_tool)
-
+        try:
+            function_declaration = FunctionDeclaration(
+                name=tool.name,
+                description=tool.description,
+                parameters=cleaned_parameters
+            )
+            gemini_tool = Tool(function_declarations=[function_declaration])
+            gemini_tools.append(gemini_tool)
+        except Exception as e:
+            print(f"{Fore.RED}Error converting tool '{tool.name}' to Gemini format: {e}{Style.RESET_ALL}")
+            print(f"Schema causing error: {json.dumps(cleaned_parameters, indent=2)}")
+            continue
     return gemini_tools
 
-
+# --- Main Execution (Updated) ---
 async def main():
-    """
-    Main entry point for the client.
-    
-    This function:
-     - Checks that a server URL is provided as a command-line argument.
-     - Creates an instance of MCPClient.
-     - Connects to the MCP server via SSE.
-     - Enters an interactive chat loop to process user queries.
-     - Cleans up all resources (like the SSE connection) when finished.
-    
-    Usage:
-        python client_sse.py <server_url>
-    """
     if len(sys.argv) < 2:
-        print("Usage: python client_sse.py <server_url>")
+        terminal_width, _ = get_terminal_size()
+        box_width = min(80, terminal_width - 4)
+        error_message = f"{Fore.RED}Usage: python client_sse.py <sse_server_url>{Style.RESET_ALL}"
+        error_section = draw_section(error_message, box_width, Fore.RED, emoji="❌")
+        print("\n" + error_section + "\n")
         sys.exit(1)
 
+    server_url = sys.argv[1]
     client = MCPClient()
+    initial_spinner = Spinner() # Separate spinner for initial connection
+
     try:
-        # Connect to the MCP server using the provided SSE URL.
-        await client.connect_to_sse_server(sys.argv[1])
-        # Start the interactive chat loop for user queries.
+        initial_spinner.start("🔄 Connecting to SSE server and initializing AI...")
+        await client.connect_to_sse_server(server_url)
+        initial_spinner.stop()
+
         await client.chat_loop()
+
+    except ConnectionRefusedError: # Might occur if server isn't running
+         initial_spinner.stop()
+         terminal_width, _ = get_terminal_size()
+         box_width = min(80, terminal_width - 4)
+         error_msg = f"Connection Refused: Could not connect to the SSE server.\nEnsure the server at '{server_url}' is running and accessible."
+         print("\n" + draw_section(error_msg, box_width, Fore.RED, emoji="❌") + "\n")
+    except Exception as e: # Catch other potential errors during connection or chat
+        initial_spinner.stop()
+        terminal_width, _ = get_terminal_size()
+        box_width = min(80, terminal_width - 4)
+        # Display unexpected errors clearly
+        error_msg = f"An unexpected error occurred:\n{type(e).__name__}: {e}"
+        print("\n" + draw_section(error_msg, box_width, Fore.RED, emoji="🔥") + "\n")
+        # import traceback # Uncomment for debugging
+        # traceback.print_exc() # Uncomment for debugging
     finally:
-        # Ensure that all resources and network connections are properly closed.
+        # Ensure cleanup runs even if errors occur during chat_loop
         await client.cleanup()
 
 if __name__ == "__main__":
-    # Run the main function using the asyncio event loop.
-    asyncio.run(main())
+    try:
+        asyncio.run(main())
+    except KeyboardInterrupt:
+        print("\n\nClient interrupted by user. Exiting.")
+        sys.exit(0)

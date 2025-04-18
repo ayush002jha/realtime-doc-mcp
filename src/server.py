@@ -37,7 +37,7 @@ tavily = TavilyClient(TAVILY_API_KEY)
 
 
 @mcp.tool()
-async def get_latest_version(technology: str) -> str:
+async def get_latest_version_tech(technology: str) -> str:
     """
     Fetches the latest stable version for the specified technology using DuckDuckGo.
     Use this as the first step when you need the most up-to-date documentation.
@@ -63,7 +63,7 @@ async def get_latest_version(technology: str) -> str:
 
 
 @mcp.tool()
-def obtain_relevant_doc_urls(technology: str, task: str, version: float = None) -> str:
+def fetch_relevant_doc_urls(technology: str, task: str, version: float = None) -> str:
     """
     Searches for documentation links using DuckDuckGo. You need to run doc_context to get the context/data of the documentation. This will only provide links.
     Call this after obtaining the latest version using `get_latest_version`.
@@ -129,7 +129,7 @@ async def lightweight_scrape(url: str) -> str:
         return f"Error processing {url}: {e}"
 
 @mcp.tool()
-async def masa_scrape_multiple_urls(urls: list[str], query: str) -> str:
+async def scrape_multiple_urls_to_get_context(urls: list[str], query: str) -> str:
     """
     Scrape multiple URLs via MASA Data API, score them against `query`,
     and return the full scrape of the most relevant URL.
