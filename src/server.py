@@ -43,7 +43,7 @@ async def get_latest_version(technology: str) -> str:
     Use this as the first step when you need the most up-to-date documentation.
 
     Parameters:
-        technology (str): Any technology name e.g. 'Next.js', 'Vite', 'C++', etc...
+        technology (str): Any technology name
     
     Returns:
         str: The extracted version string, or a message if not found.
@@ -69,7 +69,7 @@ def obtain_relevant_doc_urls(technology: str, task: str, version: float = None) 
     Call this after obtaining the latest version using `get_latest_version`.
 
     Parameters:
-        technology (str): Any technology name e.g. 'Next.js', 'Vite', 'C++', etc...
+        technology (str): Any technology name 
         task (str): Any task e.g. 'create API route', 'write backend server', etc...
         version (float, optional): Version number e.g. 13, 15.4, etc... can be obtained from calling tool 'get_latest_version'
     
