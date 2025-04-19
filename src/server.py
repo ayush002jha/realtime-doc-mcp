@@ -34,8 +34,6 @@ mcp = FastMCP("DocSearchContextServer")
 # Initialize Tavily client
 tavily = TavilyClient(TAVILY_API_KEY)
 
-
-
 @mcp.tool()
 async def get_latest_version_tech(technology: str) -> str:
     """
