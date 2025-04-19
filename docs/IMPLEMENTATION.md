@@ -62,8 +62,8 @@ The implementation follows a client-server architecture based on the Model Conte
     ```
 2.  **Clone Repository:** Obtain the project code.
     ```bash
-    git clone <repository_url>
-    cd <repository_directory>
+    git clone https://github.com/ayush002jha/realtime-doc-mcp.git
+    cd src
     ```
 3.  **Create Virtual Environment (using `uv`):**
     ```bash
