@@ -7,7 +7,7 @@ The **RealtimeDocContext** MCP provides AI models with access to fresh, relevant
 This protocol is designed as an MCP plugin, exposing specific data retrieval and processing capabilities as standardized "tools". Clients (like LLMs integrated via wrappers, CLIs, or web UIs) connect to the RealtimeDocContext server using either **STDIO** (for local execution) or **Server-Sent Events (SSE)** (for network accessibility) transports.
 
 The core workflow involves a multi-step process often orchestrated by the LLM client:
-1.  **(Optional but Recommended)** Identify the latest stable version of a technology (`get_latest_version_tech`).
+1.  Identify the latest stable version of a technology (`get_latest_version_tech`).
 2.  Find relevant documentation URLs based on the technology, user task, and optionally, the version (`fetch_relevant_doc_urls`).
 3.  Scrape content from multiple candidate URLs, semantically rank them against the user's query, and return the most relevant content (`scrape_multiple_urls_to_get_context`).
 
@@ -72,59 +72,7 @@ This protocol leverages external services like the MASA Data API, Tavily Search 
 
 This diagram illustrates the sequence of interactions between the user, client, LLM, MCP server, and external services.
 
-sequenceDiagram
-    participant User
-    participant Client
-    participant LLM
-    participant MCP Server
-    participant External APIs
-    
-    %% Connection & Initialization
-    Client->>MCP Server: initialize
-    MCP Server-->>Client: initialization response
-    
-    %% Tool Discovery
-    Client->>MCP Server: list_tools
-    MCP Server-->>Client: tools and schemas
-    
-    %% Query Processing
-    User->>Client: Query (e.g., "What's new in React?")
-    Client->>LLM: Forward query + available tools
-    
-    %% Tool Decision
-    LLM->>Client: function_call (e.g., get_latest_version_tech)
-    
-    %% Tool Invocation
-    Client->>MCP Server: call_tool request
-    
-    %% Tool Execution
-    MCP Server->>External APIs: API calls (Tavily, DDGS, MASA)
-    External APIs-->>MCP Server: API responses
-    MCP Server->>MCP Server: Process results (embeddings, ranking)
-    
-    %% Tool Response
-    MCP Server-->>Client: Tool result
-    
-    %% LLM Continuation - Multiple Tool Calls
-    Client->>LLM: function_response
-    LLM->>Client: function_call (e.g., fetch_relevant_doc_urls)
-    Client->>MCP Server: call_tool request
-    MCP Server->>External APIs: API calls
-    External APIs-->>MCP Server: API responses
-    MCP Server-->>Client: Tool result
-    Client->>LLM: function_response
-    
-    %% Additional Tool Call
-    LLM->>Client: function_call (e.g., scrape_multiple_urls_to_get_context)
-    Client->>MCP Server: call_tool request
-    MCP Server->>External APIs: API calls
-    External APIs-->>MCP Server: API responses
-    MCP Server-->>Client: Tool result
-    Client->>LLM: function_response
-    
-    %% Final Output
-    LLM->>Client: Final text response
-    Client->>User: Display answer
+![Sequence Diagram of Data Flow](/assets/images/sequence_diagram.png)
 
 ## Context Management
 
