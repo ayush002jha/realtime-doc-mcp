@@ -35,20 +35,20 @@ This implementation leverages the Model Context Protocol (MCP) standard, offerin
 .
 ├── assets
 │ └── images
-│ └── sequence_diagram.png # Image used in SPECIFICATION.md (optional)
+│ └── sequence_diagram.png      # Image used in SPECIFICATION.md (optional)
 ├── docs
-│ ├── IMPLEMENTATION.md # Detailed implementation guide
-│ └── SPECIFICATION.md # Protocol specification & design
+│ ├── IMPLEMENTATION.md         # Detailed implementation guide
+│ └── SPECIFICATION.md          # Protocol specification & design
 ├── src
-│ ├── app.py # Gradio Web UI Client (SSE)
-│ ├── client_cli.py # CLI Client (STDIO)
-│ ├── client_sse_cli.py # CLI Client (SSE)
-│ ├── server.py # MCP Server (STDIO)
-│ └── server_sse.py # MCP Server (SSE)
+│ ├── app.py                    # Gradio Web UI Client (SSE)
+│ ├── client_cli.py             # CLI Client (STDIO)
+│ ├── client_sse_cli.py         # CLI Client (SSE)
+│ ├── server.py                 # MCP Server (STDIO)
+│ ├── server_sse.py             # MCP Server (SSE)
+│ └──pyproject.toml             # Project dependencies and metadata (for uv/pip)
 ├── .gitignore
-├── LICENSE # Project License (MIT)
-├── pyproject.toml # Project dependencies and metadata (for uv/pip)
-└── README.md # This file
+├── LICENSE                     # Project License (MIT)
+└── README.md                   # This file
 ```
 
 
